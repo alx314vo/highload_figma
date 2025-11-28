@@ -1,0 +1,92 @@
+graph TB
+    subgraph "PostgreSQL Cluster (СПб - основная БД)"
+        PG_MASTER[PostgreSQL Master<br/>СПб<br/>users, teams, projects, files<br/>file_versions, file_access<br/>document_transactions, document_snapshots]
+        PG_REPLICA1[PostgreSQL Replica 1<br/>СПб синхронная]
+        PG_REPLICA2[PostgreSQL Replica 2<br/>Нью-Йорк асинхронная]
+        PG_REPLICA3[PostgreSQL Replica 3<br/>Франкфурт асинхронная]
+        
+        PG_MASTER -->|Репликация| PG_REPLICA1
+        PG_MASTER -->|Репликация| PG_REPLICA2
+        PG_MASTER -->|Репликация| PG_REPLICA3
+    end
+    
+    subgraph "Cassandra Cluster (Multi-region)"
+        subgraph "Регион: Нью-Йорк"
+            CASS_NY1[Cassandra Node 1<br/>operations]
+            CASS_NY2[Cassandra Node 2<br/>operations]
+            CASS_NY3[Cassandra Node 3<br/>operations]
+        end
+        
+        subgraph "Регион: Франкфурт"
+            CASS_FR1[Cassandra Node 1<br/>operations]
+            CASS_FR2[Cassandra Node 2<br/>operations]
+            CASS_FR3[Cassandra Node 3<br/>operations]
+        end
+        
+        subgraph "Регион: СПб"
+            CASS_SPB1[Cassandra Node 1<br/>operations]
+            CASS_SPB2[Cassandra Node 2<br/>operations]
+            CASS_SPB3[Cassandra Node 3<br/>operations]
+        end
+        
+        CASS_NY1 <-->|RF=3<br/>Асинхронная репликация| CASS_FR1
+        CASS_NY1 <-->|RF=3<br/>Асинхронная репликация| CASS_SPB1
+        CASS_FR1 <-->|RF=3<br/>Асинхронная репликация| CASS_SPB1
+    end
+    
+    subgraph "Redis Cluster"
+        REDIS_MASTER[Redis Master<br/>user_sessions<br/>СПб]
+        REDIS_REPLICA1[Redis Replica 1<br/>Нью-Йорк]
+        REDIS_REPLICA2[Redis Replica 2<br/>Франкфурт]
+        
+        REDIS_MASTER -->|Репликация| REDIS_REPLICA1
+        REDIS_MASTER -->|Репликация| REDIS_REPLICA2
+    end
+    
+    subgraph "Ceph S3 (Multi-region)"
+        subgraph "Регион: Нью-Йорк"
+            CEPH_NY[Ceph Node<br/>document_body<br/>document_diffs<br/>document_snapshots<br/>file_versions]
+        end
+        
+        subgraph "Регион: Франкфурт"
+            CEPH_FR[Ceph Node<br/>document_body<br/>document_diffs<br/>document_snapshots<br/>file_versions]
+        end
+        
+        subgraph "Регион: СПб"
+            CEPH_SPB[Ceph Node<br/>document_body<br/>document_diffs<br/>document_snapshots<br/>file_versions]
+        end
+        
+        CEPH_NY <-->|CRUSH<br/>Репликация 3x| CEPH_FR
+        CEPH_NY <-->|CRUSH<br/>Репликация 3x| CEPH_SPB
+        CEPH_FR <-->|CRUSH<br/>Репликация 3x| CEPH_SPB
+    end
+    
+    subgraph "CDN (Global)"
+        CDN[CDN Edge Servers<br/>static_assets<br/>JS/CSS бандлы<br/>Превью файлов]
+    end
+    
+    style PG_MASTER fill:#d5e8d4,stroke:#82b366
+    style PG_REPLICA1 fill:#d5e8d4,stroke:#82b366
+    style PG_REPLICA2 fill:#d5e8d4,stroke:#82b366
+    style PG_REPLICA3 fill:#d5e8d4,stroke:#82b366
+    
+    style CASS_NY1 fill:#fff2cc,stroke:#d6b656
+    style CASS_NY2 fill:#fff2cc,stroke:#d6b656
+    style CASS_NY3 fill:#fff2cc,stroke:#d6b656
+    style CASS_FR1 fill:#fff2cc,stroke:#d6b656
+    style CASS_FR2 fill:#fff2cc,stroke:#d6b656
+    style CASS_FR3 fill:#fff2cc,stroke:#d6b656
+    style CASS_SPB1 fill:#fff2cc,stroke:#d6b656
+    style CASS_SPB2 fill:#fff2cc,stroke:#d6b656
+    style CASS_SPB3 fill:#fff2cc,stroke:#d6b656
+    
+    style REDIS_MASTER fill:#f8cecc,stroke:#b85450
+    style REDIS_REPLICA1 fill:#f8cecc,stroke:#b85450
+    style REDIS_REPLICA2 fill:#f8cecc,stroke:#b85450
+    
+    style CEPH_NY fill:#e1d5e7,stroke:#9673a6
+    style CEPH_FR fill:#e1d5e7,stroke:#9673a6
+    style CEPH_SPB fill:#e1d5e7,stroke:#9673a6
+    
+    style CDN fill:#ffe6cc,stroke:#d79b00
+

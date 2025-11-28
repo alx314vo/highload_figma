@@ -1,0 +1,160 @@
+graph TB
+    subgraph "Clients"
+        WEB[Web Client<br/>Browser]
+        MOBILE[Mobile Client]
+    end
+    
+    subgraph "Global Load Balancing"
+        CDN[CDN<br/>Cloudflare/AWS CloudFront<br/>Статика, превью]
+        DNS[Geo-Based DNS<br/>figma.com]
+    end
+    
+    subgraph "Нью-Йорк (Мастер)"
+        L7_NY_MASTER[NGINX L7<br/>Авторизация, создание файлов]
+        AUTH_SERVICE[Auth Service<br/>Регистрация, авторизация]
+        FILE_SERVICE_MASTER[File Service<br/>Создание файлов]
+    end
+    
+    subgraph "Нью-Йорк (Редактирование)"
+        L7_NY[NGINX L7<br/>Редактирование]
+        EDITOR_COLLAB_NY[Editor_Collab Service<br/>Редактирование, коллаборация<br/>CRDT синхронизация<br/>WebSocket]
+        VERSION_NY[Version Service<br/>Снапшоты, версии]
+    end
+    
+    subgraph "Франкфурт (Редактирование)"
+        L7_FR[NGINX L7<br/>Редактирование]
+        EDITOR_COLLAB_FR[Editor_Collab Service<br/>Редактирование, коллаборация<br/>CRDT синхронизация<br/>WebSocket]
+        VERSION_FR[Version Service<br/>Снапшоты, версии]
+    end
+    
+    subgraph "СПб (Редактирование)"
+        L7_SPB[NGINX L7<br/>Редактирование]
+        EDITOR_COLLAB_SPB[Editor_Collab Service<br/>Редактирование, коллаборация<br/>CRDT синхронизация<br/>WebSocket]
+        VERSION_SPB[Version Service<br/>Снапшоты, версии]
+    end
+    
+    subgraph "СПб (База данных)"
+        DB_SERVICE[DB Service<br/>Работа с PostgreSQL]
+        PG_MASTER[PostgreSQL Master<br/>Метаданные файлов<br/>users, teams, projects]
+    end
+    
+    subgraph "Storage"
+        subgraph "Cassandra (Multi-region)"
+            CASS_NY[Cassandra NY<br/>operations<br/>LOCAL_QUORUM]
+            CASS_FR[Cassandra FR<br/>operations<br/>LOCAL_QUORUM]
+            CASS_SPB[Cassandra СПб<br/>operations<br/>LOCAL_QUORUM]
+        end
+        
+        subgraph "Ceph S3 (Multi-region)"
+            CEPH_NY[Ceph NY<br/>document_body<br/>document_diffs<br/>snapshots]
+            CEPH_FR[Ceph FR<br/>document_body<br/>document_diffs<br/>snapshots]
+            CEPH_SPB[Ceph СПб<br/>document_body<br/>document_diffs<br/>snapshots]
+        end
+        
+        REDIS[Redis<br/>user_sessions]
+    end
+    
+    subgraph "Message Queue"
+        KAFKA[Kafka<br/>События для<br/>создания снапшотов]
+    end
+    
+    %% Client connections
+    WEB --> CDN
+    MOBILE --> CDN
+    WEB --> DNS
+    MOBILE --> DNS
+    
+    %% DNS routing
+    DNS -->|USA| L7_NY_MASTER
+    DNS -->|USA| L7_NY
+    DNS -->|Europe| L7_FR
+    DNS -->|Russia| L7_SPB
+    
+    %% CDN
+    CDN -->|Статика| WEB
+    CDN -->|Статика| MOBILE
+    
+    %% Нью-Йорк мастер
+    L7_NY_MASTER --> AUTH_SERVICE
+    L7_NY_MASTER --> FILE_SERVICE_MASTER
+    AUTH_SERVICE --> REDIS
+    AUTH_SERVICE -->|Чтение| DB_SERVICE
+    FILE_SERVICE_MASTER -->|Запись| DB_SERVICE
+    
+    %% Нью-Йорк редактирование
+    L7_NY --> EDITOR_COLLAB_NY
+    L7_NY --> VERSION_NY
+    EDITOR_COLLAB_NY -->|Запись operations| CASS_NY
+    EDITOR_COLLAB_NY -->|Чтение operations| CASS_NY
+    EDITOR_COLLAB_NY -->|Чтение метаданных| DB_SERVICE
+    EDITOR_COLLAB_NY -->|Чтение/запись файлов| CEPH_NY
+    EDITOR_COLLAB_NY -->|События| KAFKA
+    VERSION_NY -->|Создание снапшотов| CEPH_NY
+    VERSION_NY -->|Метаданные снапшотов| DB_SERVICE
+    VERSION_NY -->|Чтение событий| KAFKA
+    
+    %% Франкфурт редактирование
+    L7_FR --> EDITOR_COLLAB_FR
+    L7_FR --> VERSION_FR
+    EDITOR_COLLAB_FR -->|Запись operations| CASS_FR
+    EDITOR_COLLAB_FR -->|Чтение operations| CASS_FR
+    EDITOR_COLLAB_FR -->|Чтение метаданных| DB_SERVICE
+    EDITOR_COLLAB_FR -->|Чтение/запись файлов| CEPH_FR
+    EDITOR_COLLAB_FR -->|События| KAFKA
+    VERSION_FR -->|Создание снапшотов| CEPH_FR
+    VERSION_FR -->|Метаданные снапшотов| DB_SERVICE
+    VERSION_FR -->|Чтение событий| KAFKA
+    
+    %% СПб редактирование
+    L7_SPB --> EDITOR_COLLAB_SPB
+    L7_SPB --> VERSION_SPB
+    EDITOR_COLLAB_SPB -->|Запись operations| CASS_SPB
+    EDITOR_COLLAB_SPB -->|Чтение operations| CASS_SPB
+    EDITOR_COLLAB_SPB -->|Чтение метаданных| DB_SERVICE
+    EDITOR_COLLAB_SPB -->|Чтение/запись файлов| CEPH_SPB
+    EDITOR_COLLAB_SPB -->|События| KAFKA
+    VERSION_SPB -->|Создание снапшотов| CEPH_SPB
+    VERSION_SPB -->|Метаданные снапшотов| DB_SERVICE
+    VERSION_SPB -->|Чтение событий| KAFKA
+    
+    %% СПб БД
+    DB_SERVICE --> PG_MASTER
+    
+    %% Репликация Cassandra
+    CASS_NY <-->|Асинхронная репликация| CASS_FR
+    CASS_NY <-->|Асинхронная репликация| CASS_SPB
+    CASS_FR <-->|Асинхронная репликация| CASS_SPB
+    
+    %% Репликация Ceph
+    CEPH_NY <-->|CRUSH репликация 3x| CEPH_FR
+    CEPH_NY <-->|CRUSH репликация 3x| CEPH_SPB
+    CEPH_FR <-->|CRUSH репликация 3x| CEPH_SPB
+    
+    %% Styling
+    style CDN fill:#ffe6cc,stroke:#d79b00
+    style DNS fill:#ffe6cc,stroke:#d79b00
+    style L7_NY_MASTER fill:#ffe6cc,stroke:#d79b00
+    style L7_NY fill:#ffe6cc,stroke:#d79b00
+    style L7_FR fill:#ffe6cc,stroke:#d79b00
+    style L7_SPB fill:#ffe6cc,stroke:#d79b00
+    
+    style AUTH_SERVICE fill:#d5e8d4,stroke:#82b366
+    style FILE_SERVICE_MASTER fill:#d5e8d4,stroke:#82b366
+    style EDITOR_COLLAB_NY fill:#d5e8d4,stroke:#82b366
+    style EDITOR_COLLAB_FR fill:#d5e8d4,stroke:#82b366
+    style EDITOR_COLLAB_SPB fill:#d5e8d4,stroke:#82b366
+    style VERSION_NY fill:#d5e8d4,stroke:#82b366
+    style VERSION_FR fill:#d5e8d4,stroke:#82b366
+    style VERSION_SPB fill:#d5e8d4,stroke:#82b366
+    style DB_SERVICE fill:#d5e8d4,stroke:#82b366
+    
+    style PG_MASTER fill:#fff2cc,stroke:#d6b656
+    style CASS_NY fill:#fff2cc,stroke:#d6b656
+    style CASS_FR fill:#fff2cc,stroke:#d6b656
+    style CASS_SPB fill:#fff2cc,stroke:#d6b656
+    style REDIS fill:#f8cecc,stroke:#b85450
+    style CEPH_NY fill:#e1d5e7,stroke:#9673a6
+    style CEPH_FR fill:#e1d5e7,stroke:#9673a6
+    style CEPH_SPB fill:#e1d5e7,stroke:#9673a6
+    style KAFKA fill:#d5e8d4,stroke:#82b366
+

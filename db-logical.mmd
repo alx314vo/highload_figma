@@ -1,0 +1,158 @@
+erDiagram
+    users ||--o{ team_members : "has"
+    users ||--o{ file_access : "has"
+    users ||--o{ operations : "creates"
+    users ||--o{ user_sessions : "has"
+    users ||--|| user_counters : "has"
+    
+    teams ||--o{ team_members : "has"
+    teams ||--o{ projects : "has"
+    
+    projects ||--o{ files : "contains"
+    
+    files ||--|| document_body : "has"
+    files ||--o{ document_resources : "has"
+    files ||--o{ document_diffs : "has"
+    files ||--o{ document_snapshots : "has"
+    files ||--o{ document_transactions : "has"
+    files ||--o{ file_access : "has"
+    files ||--o{ file_versions : "has"
+    files ||--o{ operations : "belongs_to"
+    
+    document_snapshots ||--o{ document_transactions : "referenced_by"
+    document_transactions ||--o{ document_diffs : "has"
+    document_transactions ||--o{ operations : "has"
+    
+    static_assets ||--o{ files : "used_by"
+    
+    users {
+        uuid id PK
+        varchar email UK
+        varchar password_hash
+        varchar name
+        varchar avatar_url
+        datetime created_at
+        datetime updated_at
+    }
+    
+    user_counters {
+        uuid user_id PK,FK
+        integer files_count
+        integer projects_count
+    }
+    
+    teams {
+        uuid id PK
+        varchar name
+        uuid owner_id FK
+        datetime created_at
+        datetime updated_at
+    }
+    
+    team_members {
+        uuid team_id PK,FK
+        uuid user_id PK,FK
+        varchar role
+        datetime created_at
+    }
+    
+    projects {
+        uuid id PK
+        uuid team_id FK
+        varchar name
+        datetime created_at
+        datetime updated_at
+    }
+    
+    files {
+        uuid id PK
+        uuid project_id FK
+        varchar name
+        bigint file_size
+        varchar storage_url
+        datetime created_at
+        datetime updated_at
+    }
+    
+    document_body {
+        uuid file_id PK,FK
+        text yaml_data "YAML структура документа"
+        datetime created_at
+        datetime updated_at
+    }
+    
+    document_resources {
+        uuid id PK
+        uuid file_id FK
+        uuid resource_id
+        varchar resource_url
+        varchar resource_type
+        datetime created_at
+    }
+    
+    document_diffs {
+        uuid id PK
+        uuid file_id FK
+        uuid transaction_id FK
+        text diff_data "Диф (изменение)"
+        datetime created_at
+    }
+    
+    document_snapshots {
+        uuid id PK
+        uuid file_id FK
+        uuid transaction_id FK
+        varchar storage_url "Ссылка на снапшот в Ceph"
+        datetime created_at
+    }
+    
+    document_transactions {
+        uuid transaction_id PK
+        uuid file_id FK
+        uuid snapshot_id FK
+        datetime created_at
+    }
+    
+    file_versions {
+        uuid id PK
+        uuid file_id FK
+        integer version_number
+        varchar storage_url
+        bigint file_size
+        datetime created_at
+    }
+    
+    file_access {
+        uuid file_id PK,FK
+        uuid user_id PK,FK
+        varchar access_type "owner/editor/viewer"
+        datetime created_at
+    }
+    
+    operations {
+        uuid id PK
+        uuid file_id FK
+        uuid user_id FK
+        uuid transaction_id FK
+        varchar operation_type
+        text operation_data
+        boolean is_comment
+        text comment_data
+        datetime created_at
+    }
+    
+    static_assets {
+        uuid id PK
+        varchar asset_url
+        varchar asset_type
+        varchar cdn_url
+        datetime created_at
+    }
+    
+    user_sessions {
+        varchar session_id PK
+        uuid user_id FK
+        datetime expires_at
+        datetime created_at
+    }
+
