@@ -211,6 +211,7 @@
 ## **5. Логическая схема БД**
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'fontSize': '28px', 'primaryColor': '#fff', 'primaryTextColor': '#000', 'primaryBorderColor': '#000', 'lineColor': '#000', 'secondaryColor': '#f4f4f4', 'tertiaryColor': '#fff', 'cScale0': '#fff', 'cScale1': '#fff', 'cScale2': '#fff'}}}%%
 erDiagram
     users ||--o{ team_members : "has"
     users ||--o{ file_access : "has"
@@ -451,6 +452,7 @@ erDiagram
 ## **6. Физическая схема БД**
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'fontSize': '28px', 'primaryColor': '#fff', 'primaryTextColor': '#000', 'primaryBorderColor': '#000', 'lineColor': '#000', 'secondaryColor': '#f4f4f4', 'tertiaryColor': '#fff', 'cScale0': '#fff', 'cScale1': '#fff', 'cScale2': '#fff'}}}%%
 graph TB
     subgraph "PostgreSQL Cluster (СПб - основная БД)"
         PG_MASTER[PostgreSQL Master<br/>СПб<br/>users, teams, projects, files<br/>file_versions, file_access<br/>document_transactions, document_snapshots]
@@ -643,6 +645,7 @@ graph TB
 ## **10. Схема проекта**
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'fontSize': '28px', 'primaryColor': '#fff', 'primaryTextColor': '#000', 'primaryBorderColor': '#000', 'lineColor': '#000', 'secondaryColor': '#f4f4f4', 'tertiaryColor': '#fff', 'cScale0': '#fff', 'cScale1': '#fff', 'cScale2': '#fff'}}}%%
 graph TB
     subgraph "Clients"
         WEB[Web Client<br/>Browser]
