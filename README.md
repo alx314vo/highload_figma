@@ -210,7 +210,165 @@
 
 ## **5. Логическая схема БД**
 
-![Логическая схема БД](db-logical.png)
+```mermaid
+erDiagram
+    users ||--o{ team_members : "has"
+    users ||--o{ file_access : "has"
+    users ||--o{ operations : "creates"
+    users ||--o{ user_sessions : "has"
+    users ||--|| user_counters : "has"
+    
+    teams ||--o{ team_members : "has"
+    teams ||--o{ projects : "has"
+    
+    projects ||--o{ files : "contains"
+    
+    files ||--|| document_body : "has"
+    files ||--o{ document_resources : "has"
+    files ||--o{ document_diffs : "has"
+    files ||--o{ document_snapshots : "has"
+    files ||--o{ document_transactions : "has"
+    files ||--o{ file_access : "has"
+    files ||--o{ file_versions : "has"
+    files ||--o{ operations : "belongs_to"
+    
+    document_snapshots ||--o{ document_transactions : "referenced_by"
+    document_transactions ||--o{ document_diffs : "has"
+    document_transactions ||--o{ operations : "has"
+    
+    static_assets ||--o{ files : "used_by"
+    
+    users {
+        uuid id PK
+        varchar email UK
+        varchar password_hash
+        varchar name
+        varchar avatar_url
+        datetime created_at
+        datetime updated_at
+    }
+    
+    user_counters {
+        uuid user_id PK,FK
+        integer files_count
+        integer projects_count
+    }
+    
+    teams {
+        uuid id PK
+        varchar name
+        uuid owner_id FK
+        datetime created_at
+        datetime updated_at
+    }
+    
+    team_members {
+        uuid team_id PK,FK
+        uuid user_id PK,FK
+        varchar role
+        datetime created_at
+    }
+    
+    projects {
+        uuid id PK
+        uuid team_id FK
+        varchar name
+        datetime created_at
+        datetime updated_at
+    }
+    
+    files {
+        uuid id PK
+        uuid project_id FK
+        varchar name
+        bigint file_size
+        varchar storage_url
+        datetime created_at
+        datetime updated_at
+    }
+    
+    document_body {
+        uuid file_id PK,FK
+        text yaml_data "YAML структура документа"
+        datetime created_at
+        datetime updated_at
+    }
+    
+    document_resources {
+        uuid id PK
+        uuid file_id FK
+        uuid resource_id
+        varchar resource_url
+        varchar resource_type
+        datetime created_at
+    }
+    
+    document_diffs {
+        uuid id PK
+        uuid file_id FK
+        uuid transaction_id FK
+        text diff_data "Диф (изменение)"
+        datetime created_at
+    }
+    
+    document_snapshots {
+        uuid id PK
+        uuid file_id FK
+        uuid transaction_id FK
+        varchar storage_url "Ссылка на снапшот в Ceph"
+        datetime created_at
+    }
+    
+    document_transactions {
+        uuid transaction_id PK
+        uuid file_id FK
+        uuid snapshot_id FK
+        datetime created_at
+    }
+    
+    file_versions {
+        uuid id PK
+        uuid file_id FK
+        integer version_number
+        varchar storage_url
+        bigint file_size
+        datetime created_at
+    }
+    
+    file_access {
+        uuid file_id PK,FK
+        uuid user_id PK,FK
+        varchar access_type "owner/editor/viewer"
+        datetime created_at
+    }
+    
+    operations {
+        uuid id PK
+        uuid file_id FK
+        uuid user_id FK
+        uuid transaction_id FK
+        varchar operation_type
+        text operation_data
+        boolean is_comment
+        text comment_data
+        datetime created_at
+    }
+    
+    static_assets {
+        uuid id PK
+        varchar asset_url
+        varchar asset_type
+        varchar cdn_url
+        datetime created_at
+    }
+    
+    user_sessions {
+        varchar session_id PK
+        uuid user_id FK
+        datetime expires_at
+        datetime created_at
+    }
+```
 
 | Таблица | Назначение |
 |---------|------------|
@@ -292,7 +450,99 @@
 
 ## **6. Физическая схема БД**
 
-![Физическая схема БД](db-physical.png)
+```mermaid
+graph TB
+    subgraph "PostgreSQL Cluster (СПб - основная БД)"
+        PG_MASTER[PostgreSQL Master<br/>СПб<br/>users, teams, projects, files<br/>file_versions, file_access<br/>document_transactions, document_snapshots]
+        PG_REPLICA1[PostgreSQL Replica 1<br/>СПб синхронная]
+        PG_REPLICA2[PostgreSQL Replica 2<br/>Нью-Йорк асинхронная]
+        PG_REPLICA3[PostgreSQL Replica 3<br/>Франкфурт асинхронная]
+        
+        PG_MASTER -->|Репликация| PG_REPLICA1
+        PG_MASTER -->|Репликация| PG_REPLICA2
+        PG_MASTER -->|Репликация| PG_REPLICA3
+    end
+    
+    subgraph "Cassandra Cluster (Multi-region)"
+        subgraph "Регион: Нью-Йорк"
+            CASS_NY1[Cassandra Node 1<br/>operations]
+            CASS_NY2[Cassandra Node 2<br/>operations]
+            CASS_NY3[Cassandra Node 3<br/>operations]
+        end
+        
+        subgraph "Регион: Франкфурт"
+            CASS_FR1[Cassandra Node 1<br/>operations]
+            CASS_FR2[Cassandra Node 2<br/>operations]
+            CASS_FR3[Cassandra Node 3<br/>operations]
+        end
+        
+        subgraph "Регион: СПб"
+            CASS_SPB1[Cassandra Node 1<br/>operations]
+            CASS_SPB2[Cassandra Node 2<br/>operations]
+            CASS_SPB3[Cassandra Node 3<br/>operations]
+        end
+        
+        CASS_NY1 <-->|RF=3<br/>Асинхронная репликация| CASS_FR1
+        CASS_NY1 <-->|RF=3<br/>Асинхронная репликация| CASS_SPB1
+        CASS_FR1 <-->|RF=3<br/>Асинхронная репликация| CASS_SPB1
+    end
+    
+    subgraph "Redis Cluster"
+        REDIS_MASTER[Redis Master<br/>user_sessions<br/>СПб]
+        REDIS_REPLICA1[Redis Replica 1<br/>Нью-Йорк]
+        REDIS_REPLICA2[Redis Replica 2<br/>Франкфурт]
+        
+        REDIS_MASTER -->|Репликация| REDIS_REPLICA1
+        REDIS_MASTER -->|Репликация| REDIS_REPLICA2
+    end
+    
+    subgraph "Ceph S3 (Multi-region)"
+        subgraph "Регион: Нью-Йорк"
+            CEPH_NY[Ceph Node<br/>document_body<br/>document_diffs<br/>document_snapshots<br/>file_versions]
+        end
+        
+        subgraph "Регион: Франкфурт"
+            CEPH_FR[Ceph Node<br/>document_body<br/>document_diffs<br/>document_snapshots<br/>file_versions]
+        end
+        
+        subgraph "Регион: СПб"
+            CEPH_SPB[Ceph Node<br/>document_body<br/>document_diffs<br/>document_snapshots<br/>file_versions]
+        end
+        
+        CEPH_NY <-->|CRUSH<br/>Репликация 3x| CEPH_FR
+        CEPH_NY <-->|CRUSH<br/>Репликация 3x| CEPH_SPB
+        CEPH_FR <-->|CRUSH<br/>Репликация 3x| CEPH_SPB
+    end
+    
+    subgraph "CDN (Global)"
+        CDN[CDN Edge Servers<br/>static_assets<br/>JS/CSS бандлы<br/>Превью файлов]
+    end
+    
+    style PG_MASTER fill:#d5e8d4,stroke:#82b366
+    style PG_REPLICA1 fill:#d5e8d4,stroke:#82b366
+    style PG_REPLICA2 fill:#d5e8d4,stroke:#82b366
+    style PG_REPLICA3 fill:#d5e8d4,stroke:#82b366
+    
+    style CASS_NY1 fill:#fff2cc,stroke:#d6b656
+    style CASS_NY2 fill:#fff2cc,stroke:#d6b656
+    style CASS_NY3 fill:#fff2cc,stroke:#d6b656
+    style CASS_FR1 fill:#fff2cc,stroke:#d6b656
+    style CASS_FR2 fill:#fff2cc,stroke:#d6b656
+    style CASS_FR3 fill:#fff2cc,stroke:#d6b656
+    style CASS_SPB1 fill:#fff2cc,stroke:#d6b656
+    style CASS_SPB2 fill:#fff2cc,stroke:#d6b656
+    style CASS_SPB3 fill:#fff2cc,stroke:#d6b656
+    
+    style REDIS_MASTER fill:#f8cecc,stroke:#b85450
+    style REDIS_REPLICA1 fill:#f8cecc,stroke:#b85450
+    style REDIS_REPLICA2 fill:#f8cecc,stroke:#b85450
+    
+    style CEPH_NY fill:#e1d5e7,stroke:#9673a6
+    style CEPH_FR fill:#e1d5e7,stroke:#9673a6
+    style CEPH_SPB fill:#e1d5e7,stroke:#9673a6
+    
+    style CDN fill:#ffe6cc,stroke:#d79b00
+```
 
 ### **Выбор СУБД**
 
@@ -392,7 +642,167 @@
 
 ## **10. Схема проекта**
 
-[![Схема проекта](https://mermaid.ink/img/pako:eNrNWf9v00YU_1csIyQmpSXkeyOElK-lIklL3MJYiiInvqQZjl35C4MRJOhgmgQaTJo0TWLakCbt18KGVsoK_4L9H-3dnWOfHSdOUpBoVTW--7zPe_e553fv2nt8V5UQn-f7mri_x20XdxUOvnSzQwd2-ZI8QIqh7_J0Bn9drxRb11GHo1MXO9r5S0VN_UZH2k0PVN8sbtQqrbraGcjIgTrTSJHohwln67LaEWWupooSVxRlUekOlD7rulRutOCH-CzJqin1ZFFD5wvXBY48VjXVich6aR9Yh_BzZB1bhzHO-mA_sN5Yr-2n9o9MmOWG0FpH6kpR1JGEn4hxb9AfiqtddRgZsfUbJlyxfrXeA_8xd856AV4fgt839oMv2NBr2XbjRrteELYrzVZjfaPxJQzRUJ9DWAeE4Mj6F8y_t47sZzHOfmi9h-d_rEPrBGbecPYj-PjWegfDr5k1FHa2L7eFSvPaRqnSKpjGHicg7fagiyj7H7Dsv4ERggIPLjtQhXhlaKuwf2PacdxVvJk-9pfRMS6iHg4Wkx3jnYMxYBlTT6oZkHGGLbOsSnlje7PZLm3WaoUiJqlIA0PV2iVVlsXOpHRTGEHAY3h-B9-H1isSvyMhTc5meRtv4JF1Yj8mlieszAQD75Cgdm8hg4nuWqUpbGw2cFzXkKYPVCUo9wn4-2D_AB4P7CcQxWucacTTUbTef-IwgeLYfmR_B2YHi0lebX4EyYHks5Qc4voUkr-0frdeLSazsFX8CDpjls9SaBzYp1T6JyCBaDinKp3YT-zHPonLRbdclotBVeiK4eyAJXJbqm70NSRcrTHr2Fofl0NvmquLuoE0SvICogYCz3-gLhKUCeelHuMMJA7h176mfo26hh65SgH2U-wjdjnsaS3quqhImsidq5uyMVjRUB9k9q2enKMFQcA1xsM3bpCo1H2kiQaY6OSxtlkq1NpXdzabO_WbIRTwzngU1eYyFDgbPA66iQvwuEp5agU1QfBLSEYpUtm6TBTBaEcMSe2aQ-hb2h1VuusfkQa9Ho1LV8R9fU91t85HiPXBhI40pyckamFGRqilWado14Q6IrSaSBrobqa2daTjFzY6QesAhATlrprI9KXplUL1SqF1RezdEr3W4RW8nLj-PMNv6zunePgbH5iDAaYyTG8tzp51Ok2uqyoKvE84YjoFTSu3snIJd5B0gDao_rExCPrACZA75rqCEU5TTQP3qIrTTGLoaEcojHz93rRp_3jF1CDnR_Sg9U81TVBfHDmHQ3DJ4_DhA0H7e98RXtZsAF1mgDbYnFn_eZ0tBbFLJBqxnegUSEhXSZGsLUGSNAyfG1l_4TjoaTVi6jmFh_igVr_gJCKt8NNJq6kLJxeHKUcls0oSdLC7DM57_R2dCeIn4uS8Mjgal-1ZpowwpzGFzQ6cYfbjSckiec7jg9hdCnsGjsYVdxaTr0KMaAWheE9HD-m7hkxUjIDDIEHomR1CEpQgyMOKSOqYE7_11he_l2yTLflc-VZthuTbuGx4815zG6ZztTlHvs02nZlv85suk28hPJH5Njui6HxjkXPl29hhkOC0-RYm4lz5RrvkuXIMjpqQJHMPIAbBtPZh-jqwiESLMp6ZaosYL5NsYUSR2RYVVHS--aBzJZzrc4LitCkXquUCOQcXs5-dtqboO-ndC1XQDt9RP4CipE2ht0vOvSs4LQ0917iLJLLngWsprA23jw8meQIV6pQ0rugO6al5IjSAG4Djj55p1F-puSNcDqXnkncC9WhhQ2-JlGYJS3dRgnFXdrtmHR4QaU17A1nOn-n1UKbbjemGpt5C-TNSdq0Tj7NQ3BTPCfW1n4vYLACuLsKM36FINGvja32ppZRGOSnlWuYSnWQmw9qE9b9zmk70YUvZVZf056kTacj0XQtazB8cW_jmNGEqW6QFa-eWQDc7egk2OzKdTNrnaFywFoFXF2NnczUCT-5qY3CuixhwJ5dOpX2vwbj0UDi6ABJlXfhaJpsUMxNwN_T54F7okXhyYM3erF2Fj_F9bSDxeUMzUYwfIm0o4kf-Hqba5Y09NES7fB4-SqgnmrKB__JxH8z2ReUrVR2OLTXV7O_x-Z4o6_Bk7kuigcoDsa-JQ3dUQ4qEtJJqKgafT2TXCAmfv8ff4fOp1GomHU-k1pJr6UQmFePvAuRCejURz8QzyWQ2kUil4tn7Mf5b4jS-msulEtlsKp5MplOZVCoX4xH5m3Cd_t-P_Pvv_v-xomts?type=png)](https://mermaid.live/edit#pako:eNrNWf9v00YU_1csIyQmpSXkeyOElK-lIklL3MJYiiInvqQZjl35C4MRJOhgmgQaTJo0TWLakCbt18KGVsoK_4L9H-3dnWOfHSdOUpBoVTW--7zPe_e553fv2nt8V5UQn-f7mri_x20XdxUOvnSzQwd2-ZI8QIqh7_J0Bn9drxRb11GHo1MXO9r5S0VN_UZH2k0PVN8sbtQqrbraGcjIgTrTSJHohwln67LaEWWupooSVxRlUekOlD7rulRutOCH-CzJqin1ZFFD5wvXBY48VjXVich6aR9Yh_BzZB1bhzHO-mA_sN5Yr-2n9o9MmOWG0FpH6kpR1JGEn4hxb9AfiqtddRgZsfUbJlyxfrXeA_8xd856AV4fgt839oMv2NBr2XbjRrteELYrzVZjfaPxJQzRUJ9DWAeE4Mj6F8y_t47sZzHOfmi9h-d_rEPrBGbecPYj-PjWegfDr5k1FHa2L7eFSvPaRqnSKpjGHicg7fagiyj7H7Dsv4ERggIPLjtQhXhlaKuwf2PacdxVvJk-9pfRMS6iHg4Wkx3jnYMxYBlTT6oZkHGGLbOsSnlje7PZLm3WaoUiJqlIA0PV2iVVlsXOpHRTGEHAY3h-B9-H1isSvyMhTc5meRtv4JF1Yj8mlieszAQD75Cgdm8hg4nuWqUpbGw2cFzXkKYPVCUo9wn4-2D_AB4P7CcQxWucacTTUbTef-IwgeLYfmR_B2YHi0lebX4EyYHks5Qc4voUkr-0frdeLSazsFX8CDpjls9SaBzYp1T6JyCBaDinKp3YT-zHPonLRbdclotBVeiK4eyAJXJbqm70NSRcrTHr2Fofl0NvmquLuoE0SvICogYCz3-gLhKUCeelHuMMJA7h176mfo26hh65SgH2U-wjdjnsaS3quqhImsidq5uyMVjRUB9k9q2enKMFQcA1xsM3bpCo1H2kiQaY6OSxtlkq1NpXdzabO_WbIRTwzngU1eYyFDgbPA66iQvwuEp5agU1QfBLSEYpUtm6TBTBaEcMSe2aQ-hb2h1VuusfkQa9Ho1LV8R9fU91t85HiPXBhI40pyckamFGRqilWado14Q6IrSaSBrobqa2daTjFzY6QesAhATlrprI9KXplUL1SqF1RezdEr3W4RW8nLj-PMNv6zunePgbH5iDAaYyTG8tzp51Ok2uqyoKvE84YjoFTSu3snIJd5B0gDao_rExCPrACZA75rqCEU5TTQP3qIrTTGLoaEcojHz93rRp_3jF1CDnR_Sg9U81TVBfHDmHQ3DJ4_DhA0H7e98RXtZsAF1mgDbYnFn_eZ0tBbFLJBqxnegUSEhXSZGsLUGSNAyfG1l_4TjoaTVi6jmFh_igVr_gJCKt8NNJq6kLJxeHKUcls0oSdLC7DM57_R2dCeIn4uS8Mjgal-1ZpowwpzGFzQ6cYfbjSckiec7jg9hdCnsGjsYVdxaTr0KMaAWheE9HD-m7hkxUjIDDIEHomR1CEpQgyMOKSOqYE7_11he_l2yTLflc-VZthuTbuGx4815zG6ZztTlHvs02nZlv85suk28hPJH5Njui6HxjkXPl29hhkOC0-RYm4lz5RrvkuXIMjpqQJHMPIAbBtPZh-jqwiESLMp6ZaosYL5NsYUSR2RYVVHS--aBzJZzrc4LitCkXquUCOQcXs5-dtqboO-ndC1XQDt9RP4CipE2ht0vOvSs4LQ0917iLJLLngWsprA23jw8meQIV6pQ0rugO6al5IjSAG4Djj55p1F-puSNcDqXnkncC9WhhQ2-JlGYJS3dRgnFXdrtmHR4QaU17A1nOn-n1UKbbjemGpt5C-TNSdq0Tj7NQ3BTPCfW1n4vYLACuLsKM36FINGvja32ppZRGOSnlWuYSnWQmw9qE9b9zmk70YUvZVZf056kTacj0XQtazB8cW_jmNGEqW6QFa-eWQDc7egk2OzKdTNrnaFywFoFXF2NnczUCT-5qY3CuixhwJ5dOpX2vwbj0UDi6ABJlXfhaJpsUMxNwN_T54F7okXhyYM3erF2Fj_F9bSDxeUMzUYwfIm0o4kf-Hqba5Y09NES7fB4-SqgnmrKB__JxH8z2ReUrVR2OLTXV7O_x-Z4o6_Bk7kuigcoDsa-JQ3dUQ4qEtJJqKgafT2TXCAmfv8ff4fOp1GomHU-k1pJr6UQmFePvAuRCejURz8QzyWQ2kUil4tn7Mf5b4jS-msulEtlsKp5MplOZVCoX4xH5m3Cd_t-P_Pvv_v-xomts)
+```mermaid
+graph TB
+    subgraph "Clients"
+        WEB[Web Client<br/>Browser]
+        MOBILE[Mobile Client]
+    end
+    
+    subgraph "Global Load Balancing"
+        CDN[CDN<br/>Cloudflare/AWS CloudFront<br/>Статика, превью]
+        DNS[Geo-Based DNS<br/>figma.com]
+    end
+    
+    subgraph "Нью-Йорк (Мастер)"
+        L7_NY_MASTER[NGINX L7<br/>Авторизация, создание файлов]
+        AUTH_SERVICE[Auth Service<br/>Регистрация, авторизация]
+        FILE_SERVICE_MASTER[File Service<br/>Создание файлов]
+    end
+    
+    subgraph "Нью-Йорк (Редактирование)"
+        L7_NY[NGINX L7<br/>Редактирование]
+        EDITOR_COLLAB_NY[Editor_Collab Service<br/>Редактирование, коллаборация<br/>CRDT синхронизация<br/>WebSocket]
+        VERSION_NY[Version Service<br/>Снапшоты, версии]
+    end
+    
+    subgraph "Франкфурт (Редактирование)"
+        L7_FR[NGINX L7<br/>Редактирование]
+        EDITOR_COLLAB_FR[Editor_Collab Service<br/>Редактирование, коллаборация<br/>CRDT синхронизация<br/>WebSocket]
+        VERSION_FR[Version Service<br/>Снапшоты, версии]
+    end
+    
+    subgraph "СПб (Редактирование)"
+        L7_SPB[NGINX L7<br/>Редактирование]
+        EDITOR_COLLAB_SPB[Editor_Collab Service<br/>Редактирование, коллаборация<br/>CRDT синхронизация<br/>WebSocket]
+        VERSION_SPB[Version Service<br/>Снапшоты, версии]
+    end
+    
+    subgraph "СПб (База данных)"
+        DB_SERVICE[DB Service<br/>Работа с PostgreSQL]
+        PG_MASTER[PostgreSQL Master<br/>Метаданные файлов<br/>users, teams, projects]
+    end
+    
+    subgraph "Storage"
+        subgraph "Cassandra (Multi-region)"
+            CASS_NY[Cassandra NY<br/>operations<br/>LOCAL_QUORUM]
+            CASS_FR[Cassandra FR<br/>operations<br/>LOCAL_QUORUM]
+            CASS_SPB[Cassandra СПб<br/>operations<br/>LOCAL_QUORUM]
+        end
+        
+        subgraph "Ceph S3 (Multi-region)"
+            CEPH_NY[Ceph NY<br/>document_body<br/>document_diffs<br/>snapshots]
+            CEPH_FR[Ceph FR<br/>document_body<br/>document_diffs<br/>snapshots]
+            CEPH_SPB[Ceph СПб<br/>document_body<br/>document_diffs<br/>snapshots]
+        end
+        
+        REDIS[Redis<br/>user_sessions]
+    end
+    
+    subgraph "Message Queue"
+        KAFKA[Kafka<br/>События для<br/>создания снапшотов]
+    end
+    
+    %% Client connections
+    WEB --> CDN
+    MOBILE --> CDN
+    WEB --> DNS
+    MOBILE --> DNS
+    
+    %% DNS routing
+    DNS -->|USA| L7_NY_MASTER
+    DNS -->|USA| L7_NY
+    DNS -->|Europe| L7_FR
+    DNS -->|Russia| L7_SPB
+    
+    %% CDN
+    CDN -->|Статика| WEB
+    CDN -->|Статика| MOBILE
+    
+    %% Нью-Йорк мастер
+    L7_NY_MASTER --> AUTH_SERVICE
+    L7_NY_MASTER --> FILE_SERVICE_MASTER
+    AUTH_SERVICE --> REDIS
+    AUTH_SERVICE -->|Чтение| DB_SERVICE
+    FILE_SERVICE_MASTER -->|Запись| DB_SERVICE
+    
+    %% Нью-Йорк редактирование
+    L7_NY --> EDITOR_COLLAB_NY
+    L7_NY --> VERSION_NY
+    EDITOR_COLLAB_NY -->|Запись operations| CASS_NY
+    EDITOR_COLLAB_NY -->|Чтение operations| CASS_NY
+    EDITOR_COLLAB_NY -->|Чтение метаданных| DB_SERVICE
+    EDITOR_COLLAB_NY -->|Чтение/запись файлов| CEPH_NY
+    EDITOR_COLLAB_NY -->|События| KAFKA
+    VERSION_NY -->|Создание снапшотов| CEPH_NY
+    VERSION_NY -->|Метаданные снапшотов| DB_SERVICE
+    VERSION_NY -->|Чтение событий| KAFKA
+    
+    %% Франкфурт редактирование
+    L7_FR --> EDITOR_COLLAB_FR
+    L7_FR --> VERSION_FR
+    EDITOR_COLLAB_FR -->|Запись operations| CASS_FR
+    EDITOR_COLLAB_FR -->|Чтение operations| CASS_FR
+    EDITOR_COLLAB_FR -->|Чтение метаданных| DB_SERVICE
+    EDITOR_COLLAB_FR -->|Чтение/запись файлов| CEPH_FR
+    EDITOR_COLLAB_FR -->|События| KAFKA
+    VERSION_FR -->|Создание снапшотов| CEPH_FR
+    VERSION_FR -->|Метаданные снапшотов| DB_SERVICE
+    VERSION_FR -->|Чтение событий| KAFKA
+    
+    %% СПб редактирование
+    L7_SPB --> EDITOR_COLLAB_SPB
+    L7_SPB --> VERSION_SPB
+    EDITOR_COLLAB_SPB -->|Запись operations| CASS_SPB
+    EDITOR_COLLAB_SPB -->|Чтение operations| CASS_SPB
+    EDITOR_COLLAB_SPB -->|Чтение метаданных| DB_SERVICE
+    EDITOR_COLLAB_SPB -->|Чтение/запись файлов| CEPH_SPB
+    EDITOR_COLLAB_SPB -->|События| KAFKA
+    VERSION_SPB -->|Создание снапшотов| CEPH_SPB
+    VERSION_SPB -->|Метаданные снапшотов| DB_SERVICE
+    VERSION_SPB -->|Чтение событий| KAFKA
+    
+    %% СПб БД
+    DB_SERVICE --> PG_MASTER
+    
+    %% Репликация Cassandra
+    CASS_NY <-->|Асинхронная репликация| CASS_FR
+    CASS_NY <-->|Асинхронная репликация| CASS_SPB
+    CASS_FR <-->|Асинхронная репликация| CASS_SPB
+    
+    %% Репликация Ceph
+    CEPH_NY <-->|CRUSH репликация 3x| CEPH_FR
+    CEPH_NY <-->|CRUSH репликация 3x| CEPH_SPB
+    CEPH_FR <-->|CRUSH репликация 3x| CEPH_SPB
+    
+    %% Styling
+    style CDN fill:#ffe6cc,stroke:#d79b00
+    style DNS fill:#ffe6cc,stroke:#d79b00
+    style L7_NY_MASTER fill:#ffe6cc,stroke:#d79b00
+    style L7_NY fill:#ffe6cc,stroke:#d79b00
+    style L7_FR fill:#ffe6cc,stroke:#d79b00
+    style L7_SPB fill:#ffe6cc,stroke:#d79b00
+    
+    style AUTH_SERVICE fill:#d5e8d4,stroke:#82b366
+    style FILE_SERVICE_MASTER fill:#d5e8d4,stroke:#82b366
+    style EDITOR_COLLAB_NY fill:#d5e8d4,stroke:#82b366
+    style EDITOR_COLLAB_FR fill:#d5e8d4,stroke:#82b366
+    style EDITOR_COLLAB_SPB fill:#d5e8d4,stroke:#82b366
+    style VERSION_NY fill:#d5e8d4,stroke:#82b366
+    style VERSION_FR fill:#d5e8d4,stroke:#82b366
+    style VERSION_SPB fill:#d5e8d4,stroke:#82b366
+    style DB_SERVICE fill:#d5e8d4,stroke:#82b366
+    
+    style PG_MASTER fill:#fff2cc,stroke:#d6b656
+    style CASS_NY fill:#fff2cc,stroke:#d6b656
+    style CASS_FR fill:#fff2cc,stroke:#d6b656
+    style CASS_SPB fill:#fff2cc,stroke:#d6b656
+    style REDIS fill:#f8cecc,stroke:#b85450
+    style CEPH_NY fill:#e1d5e7,stroke:#9673a6
+    style CEPH_FR fill:#e1d5e7,stroke:#9673a6
+    style CEPH_SPB fill:#e1d5e7,stroke:#9673a6
+    style KAFKA fill:#d5e8d4,stroke:#82b366
+```
 
 ### **Описание сервисов**
 
