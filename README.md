@@ -102,13 +102,24 @@
 
 Поэтому используем следующую архитектуру:
 
-*   **Основная база данных в Санкт-Петербурге (Россия):** PostgreSQL с метаданными файлов, пользователей, проектов. Здесь же приложения для работы с базой.
-*   **Центральный сервер в Нью-Йорке (США):** Авторизация, создание файлов (бордов), управление проектами. Мастер-нода PostgreSQL для записи метаданных.
+*   **PostgreSQL (Санкт-Петербург):** 
+    - Хранит все метаданные: users, teams, projects, files, file_access, file_versions
+    - Хранит метаданные документов: document_snapshots (ссылки на снапшоты в Ceph), operations_metadata (ID, file_id, transaction_counter, snapshot_id)
+    - Мастер-нода в СПб, реплики в других регионах для чтения
+    - DB_Service в СПб рядом с базой для минимизации задержки
+
+*   **Нью-Йорк (мастер-сервер):**
+    - Auth_Service и File_Service для авторизации и создания файлов
+    - Все новые файлы создаются здесь, метаданные записываются в PostgreSQL мастер в СПб
+    - Используется отдельный домен `api.figma.com` для создания файлов (не балансируется через Geo-DNS)
+
 *   **Региональные ДЦ для редактирования:**
   - **Нью-Йорк (США):** 38% пользователей — редактирование файлов
   - **Франкфурт (Европа):** ~20% пользователей — редактирование файлов  
   - **Санкт-Петербург (Россия):** ~15% пользователей — редактирование файлов
-*   **CDN (глобальная сеть):** Статика (JS/CSS), превью файлов, ассеты — раздаются из ближайших edge-серверов по всему миру
+  - В каждом регионе: Editor_Collab_Service, Cassandra (operations), Ceph (файлы)
+
+*   **CDN (Cloudflare — внешний сервис):** Статика (JS/CSS), превью файлов, ассеты — раздаются из edge-серверов по всему миру, не размещается в наших дц
 
 **3.2. Распределение нагрузки по ДЦ**
 
@@ -126,17 +137,19 @@
 
 **3.3. Схема глобальной балансировки**
 
-**CDN (Cloudflare / AWS CloudFront):**
+**CDN (Cloudflare — выбранный провайдер):**
+- Внешний сервис, не размещается в наших ДЦ
 - Статика (JS/CSS бандлы, ассеты, превью) отдается из ближайших edge-серверов по всему миру
-- Защита от DDoS на уровне CDN
-- TTL для статики: 24 часа
+- Защита от DDoS на уровне CDN (встроенная в Cloudflare)
+- TTL для статики: 24 часа, для превью файлов: 1 час
 
 **Geo-Based DNS:**
-- Пользователи из США → `figma.com` → Нью-Йорк (редактирование)
-- Пользователи из Европы → `figma.com` → Франкфурт (редактирование)  
-- Пользователи из России → `figma.com` → Санкт-Петербург (редактирование)
-- Авторизация и создание файлов → Нью-Йорк (мастер)
-- Чтение/запись БД → Санкт-Петербург (основная БД)
+- `figma.com` → балансируется по географии пользователя:
+  - Пользователи из США → Нью-Йорк (редактирование)
+  - Пользователи из Европы → Франкфурт (редактирование)  
+  - Пользователи из России → Санкт-Петербург (редактирование)
+- `api.figma.com` → всегда направляется в Нью-Йорк (мастер) для авторизации и создания файлов
+- Чтение/запись БД → всегда направляется в Санкт-Петербург через DB_Service
 
 **3.4. Механизм регулировки трафика между ДЦ**
 
@@ -185,9 +198,15 @@
 
 ### **4.2. Расчет количества балансировщиков (на примере Москвы)**
 
-**Допущения:**
-- Один NGINX L7-инстанс способен обрабатывать **8,000 RPS** (с учетом SSL termination и кэширования)
-- Целевая загрузка: **70%** (U = 0.7)
+**Расчет производительности NGINX L7:**
+
+По бенчмаркам NGINX Inc. (2017):
+- NGINX с SSL termination обрабатывает до **10,000-12,000 RPS** на инстансе среднего класса (2 vCPU, 8 ГБ RAM)
+- С учетом кэширования метаданных и реальной нагрузки берем значение: **8,000 RPS** на инстанс
+- Это соответствует 99-му процентилю latency < 100 мс
+
+**Параметры расчета:**
+- Целевая загрузка: **70%** (U = 0.7) — оставляем запас для всплесков
 - Запас на всплески: **30%** (S = 1.3) — это разница между целевой загрузкой 70% и максимальной 100%
 
 **Расчет для L7-балансировщиков (на примере Нью-Йорка):**
@@ -226,16 +245,12 @@ erDiagram
     
     files ||--|| document_body : "has"
     files ||--o{ document_resources : "has"
-    files ||--o{ document_diffs : "has"
     files ||--o{ document_snapshots : "has"
-    files ||--o{ document_transactions : "has"
     files ||--o{ file_access : "has"
     files ||--o{ file_versions : "has"
     files ||--o{ operations : "belongs_to"
     
-    document_snapshots ||--o{ document_transactions : "referenced_by"
-    document_transactions ||--o{ document_diffs : "has"
-    document_transactions ||--o{ operations : "has"
+    document_snapshots ||--o{ operations : "referenced_by"
     
     static_assets ||--o{ files : "used_by"
     
@@ -304,26 +319,11 @@ erDiagram
         datetime created_at
     }
     
-    document_diffs {
-        uuid id PK
-        uuid file_id FK
-        uuid transaction_id FK
-        text diff_data "Диф (изменение)"
-        datetime created_at
-    }
-    
     document_snapshots {
         uuid id PK
         uuid file_id FK
-        uuid transaction_id FK
+        bigint transaction_counter "Счетчик транзакций (CRDT counter)"
         varchar storage_url "Ссылка на снапшот в Ceph"
-        datetime created_at
-    }
-    
-    document_transactions {
-        uuid transaction_id PK
-        uuid file_id FK
-        uuid snapshot_id FK
         datetime created_at
     }
     
@@ -347,11 +347,13 @@ erDiagram
         uuid id PK
         uuid file_id FK
         uuid user_id FK
-        uuid transaction_id FK
+        bigint transaction_counter "Счетчик транзакций для файла (CRDT counter, заменяет transaction_id)"
+        bigint vector_clock "Vector clock для CRDT (timestamp в наносекундах + user_id hash)"
         varchar operation_type
-        text operation_data
+        text operation_data "CRDT операция в формате JSON"
         boolean is_comment
         text comment_data
+        uuid snapshot_id FK "Ссылка на снапшот, относительно которого применяется операция"
         datetime created_at
     }
     
@@ -380,9 +382,7 @@ erDiagram
 | **files** | Метаданные дизайн-файлов (бордов) |
 | **document_body** | Тело документа в формате YAML — структура элементов холста |
 | **document_resources** | Ресурсы документа (изображения, шрифты, иконки) — ссылки на файлы в Object Storage |
-| **document_diffs** | Дифы (изменения) документа — аналогично git, хранятся последовательно |
-| **document_snapshots** | Снапшоты (снимки состояния) документа по ID транзакции — для быстрого восстановления |
-| **document_transactions** | Транзакции (ID транзакции, ссылка на снапшот, список дифов) — для определения точки применения дифов |
+| **document_snapshots** | Снапшоты (снимки состояния) документа по transaction_counter — для быстрого восстановления, метаданные в PostgreSQL |
 | **file_access** | Права доступа к файлам (владелец, редактор, зритель) |
 | **operations** | Операции редактирования и комментарии (объединены) — для синхронизации и коллаборации |
 | **static_assets** | Статика (JS/CSS бандлы, ассеты) — метаданные для CDN |
@@ -390,27 +390,28 @@ erDiagram
 
 ### **Как устроен документ (файл/борд)**
 
-Документ хранится по модели, похожей на git:
+Документ хранится по модели, похожей на git, с использованием CRDT для разрешения конфликтов:
 
-1. **Снапшот (snapshot)** — полное состояние документа в формате YAML на момент транзакции
-   - Создается периодически (например, каждые 100 операций или раз в час)
+1. **Снапшот (snapshot)** — полное состояние документа в формате YAML на момент определенного счетчика транзакций
+   - Создается периодически: каждые 1000 операций или раз в час (что наступит раньше)
    - Хранится в Object Storage (Ceph)
-   - Имеет ID транзакции, относительно которой можно применять дифы
+   - Имеет transaction_counter (счетчик транзакций), относительно которого применяются операции
 
-2. **Дифы (diffs)** — последовательность изменений относительно снапшота
-   - Каждый диф содержит: ID транзакции, тип операции (добавить/удалить/изменить элемент), данные операции
-   - Хранятся в Cassandra последовательно
-   - Применяются к снапшоту для получения актуального состояния
+2. **Операции (operations)** — последовательность изменений относительно снапшота, хранятся в Cassandra
+   - Каждая операция содержит: transaction_counter (монотонно возрастающий счетчик для файла), vector_clock (для CRDT), тип операции, данные операции в формате CRDT JSON
+   - Используется CRDT (Conflict-free Replicated Data Types) для автоматического разрешения конфликтов при одновременном редактировании
+   - Vector clock позволяет определить порядок операций и разрешить конфликты без централизованной координации
+   - Метаданные операций (ID, file_id, transaction_counter, snapshot_id) также хранятся в PostgreSQL для быстрого поиска
 
-3. **Транзакции** — связывают снапшот и дифы
-   - ID транзакции определяет точку относительно снапшота
-   - Позволяет точно определить, с какой позиции накатывать дифы
-   - Решает проблему конфликтов при одновременном редактировании
+3. **CRDT структура операций:**
+   - **transaction_counter** — монотонно возрастающий счетчик для каждого файла (генерируется на стороне клиента или сервера с использованием распределенного счетчика)
+   - **vector_clock** — комбинация timestamp в наносекундах и hash user_id для обеспечения уникальности и порядка
+   - **operation_data** — JSON с CRDT операцией (например, добавление/удаление/изменение элемента с координатами и свойствами)
 
 **Пример:** 
-- Снапшот на транзакции #1000 (состояние документа на момент 1000-й операции)
-- Дифы с транзакции #1001 до #1050 (50 изменений)
-- Чтобы получить актуальное состояние: берем снапшот #1000 + применяем все дифы с #1001 до текущей транзакции
+- Снапшот на transaction_counter #1000 (состояние документа на момент 1000-й операции)
+- Операции с transaction_counter #1001 до #1050 (50 изменений)
+- Чтобы получить актуальное состояние: берем снапшот #1000 + применяем все операции с #1001 до текущего счетчика, используя CRDT для разрешения конфликтов
 
 ### **Размеры таблиц и QPS**
 
@@ -425,12 +426,55 @@ erDiagram
 | **file_access** | Состав: FileID(8) + UserID(8) + AccessType(20) + CreatedAt(8) = **≈44 B**<br>Количество: 260M × 2.5 = **650,000,000** | **≈29 ГБ** | **650,000,000** | **50** | **596** |
 | **document_body** | Состав: FileID(8) + YAMLData(средний размер 2 МБ) = **≈2 МБ**<br>Количество: 260,000,000 файлов | **≈520 ТБ** | **260,000,000** | **150** (создание) | **447** (открытие) |
 | **document_resources** | Состав: FileID(8) + ResourceID(8) + ResourceURL(300) + ResourceType(50) = **≈366 B**<br>Количество: 260M × 10 ресурсов = **2,600,000,000** | **≈951 ГБ** | **2,600,000,000** | **1,500** | **4,470** |
-| **document_diffs** | Состав: DiffID(8) + FileID(8) + TransactionID(8) + DiffData(500) = **≈524 B**<br>Количество: (9,323 RPS × 86400 × 30 дней) = **≈24.2 млрд** | **≈12.7 ТБ** | **24,200,000,000** | **27,969** (пик) | **9,323** (чтение для синхронизации) |
-| **document_snapshots** | Состав: SnapshotID(8) + FileID(8) + TransactionID(8) + StorageURL(300) = **≈324 B**<br>Количество: 260M × 10 снапшотов = **2,600,000,000** | **≈842 ГБ** | **2,600,000,000** | **150** | **447** |
-| **document_transactions** | Состав: TransactionID(8) + FileID(8) + SnapshotID(8) + CreatedAt(8) = **≈32 B**<br>Количество: (9,323 RPS × 86400 × 30 дней) = **≈24.2 млрд** | **≈774 ГБ** | **24,200,000,000** | **27,969** | **9,323** |
-| **operations** | Состав: ID(8) + FileID(8) + UserID(8) + TransactionID(8) + OperationType(50) + OperationData(500) + IsComment(1) + CommentData(500) = **≈1,067 B**<br>Количество: (9,323 + 372) RPS × 86400 × 30 дней = **≈25.1 млрд** | **≈26.8 ТБ** | **25,100,000,000** | **29,085** (пик: операции + комментарии) | **9,695** (чтение для синхронизации) |
+| **document_snapshots** | Состав: SnapshotID(8) + FileID(8) + TransactionCounter(8) + StorageURL(300) + CreatedAt(8) = **≈332 B**<br>Количество: 260M × 10 снапшотов = **2,600,000,000** | **≈863 ГБ** | **2,600,000,000** | **150** | **447** |
+| **operations** | Состав: ID(8) + FileID(8) + UserID(8) + TransactionCounter(8) + VectorClock(16) + OperationType(50) + OperationData(500) + IsComment(1) + CommentData(500) + SnapshotID(8) + CreatedAt(8) = **≈1,091 B**<br>Количество: (9,323 + 372) RPS × 86400 × 30 дней = **≈25.1 млрд**<br>**Хранение:** Полные данные в Cassandra (27.4 ТБ), метаданные в PostgreSQL (ID, file_id, transaction_counter, snapshot_id) = **≈44 B на строку** × 25.1 млрд = **≈1.1 ТБ** | **≈27.4 ТБ** (Cassandra) + **≈1.1 ТБ** (PostgreSQL метаданные) | **25,100,000,000** | **29,085** (пик: операции + комментарии) | **9,695** (чтение для синхронизации) |
 | **static_assets** | Состав: AssetID(8) + AssetURL(300) + AssetType(50) + CDNURL(300) = **≈658 B**<br>Количество: ~100,000 ассетов | **≈66 МБ** | **100,000** | **10** | **500** |
 | **user_sessions** | Состав: SessionID(256) + UserID(8) + ExpiresAt(8) + CreatedAt(8) = **≈280 B**<br>Количество: 4.3M DAU × 1.5 сессий = **6,450,000** активных сессий | **≈1.8 ГБ** | **6,450,000** | **50** | **500** (проверка сессий) |
+
+### **Расчет нагрузки на PostgreSQL**
+
+**Суммарная нагрузка на запись (QPS):**
+- users: 5
+- teams: 1
+- team_members: 10
+- projects: 5
+- files: 150
+- file_versions: 150
+- file_access: 50
+- document_snapshots: 150
+- operations_metadata: 29,085 (метаданные операций записываются синхронно с операциями в Cassandra)
+- static_assets: 10
+- user_sessions: 50
+- **ИТОГО на запись: 29,666 QPS**
+
+**Суммарная нагрузка на чтение (QPS):**
+- users: 50
+- teams: 10
+- team_members: 20
+- projects: 50
+- files: 596
+- file_versions: 447
+- file_access: 596
+- document_snapshots: 447
+- operations_metadata: 9,695 (чтение метаданных для синхронизации)
+- static_assets: 500
+- user_sessions: 500
+- **ИТОГО на чтение: 12,915 QPS**
+
+**Общая нагрузка: 42,581 QPS**
+
+**Расчет количества ядер PostgreSQL:**
+- По бенчмаркам PostgreSQL обрабатывает ~100 QPS на ядро для смешанной нагрузки (запись + чтение)
+- Требуется: 42,581 / 100 = **426 ядер**
+- С учетом целевой загрузки 70% и запаса 30%: 426 / 0.7 = **609 ядер**
+- Распределение по репликам:
+  - Мастер (СПб): 609 ядер (запись + чтение)
+  - Реплика 1 (СПб синхронная): 609 ядер (только чтение)
+  - Реплика 2 (Нью-Йорк): 609 ядер (только чтение)
+  - Реплика 3 (Франкфурт): 609 ядер (только чтение)
+  - **ИТОГО: 2,436 ядер** (или ~122 сервера по 20 ядер)
+
+**Примечание:** Нагрузка на PostgreSQL высокая из-за operations_metadata (29,085 QPS записи). Это метаданные операций, которые записываются синхронно для быстрого поиска операций по файлу и transaction_counter. Полные данные операций хранятся в Cassandra.
 
 ### **Требования к консистентности**
 
@@ -442,8 +486,8 @@ erDiagram
 | **file_versions** | Strong | История версий критична |
 | **file_access** | Strong | Права доступа должны быть актуальны |
 | **document_body, document_resources** | Strong | Тело документа должно быть консистентно |
-| **document_diffs, document_snapshots, document_transactions** | Eventual | Дифы и снапшоты могут реплицироваться с задержкой |
-| **operations** | Eventual | Операции и комментарии могут быть применены с небольшой задержкой |
+| **document_snapshots** | Strong | Метаданные снапшотов должны быть консистентны (хранятся в PostgreSQL) |
+| **operations** | Eventual | Операции используют CRDT, могут реплицироваться с задержкой, конфликты разрешаются автоматически. Метаданные в PostgreSQL — Strong |
 | **static_assets** | Eventual | Статика кэшируется в CDN, может быть устаревшей |
 | **user_sessions** | Session | Достаточна консистентность в рамках сессии |
 
@@ -455,7 +499,7 @@ erDiagram
 %%{init: {'theme':'base', 'themeVariables': { 'fontSize': '38px', 'primaryColor': '#fff', 'primaryTextColor': '#000', 'primaryBorderColor': '#000', 'lineColor': '#000', 'secondaryColor': '#f4f4f4', 'tertiaryColor': '#fff', 'cScale0': '#fff', 'cScale1': '#fff', 'cScale2': '#fff'}}}%%
 graph TB
     subgraph "PostgreSQL Cluster (СПб - основная БД)"
-        PG_MASTER[PostgreSQL Master<br/>СПб<br/>users, teams, projects, files<br/>file_versions, file_access<br/>document_transactions, document_snapshots]
+        PG_MASTER[PostgreSQL Master<br/>СПб<br/>users, teams, projects, files<br/>file_versions, file_access<br/>document_snapshots<br/>operations_metadata<br/>ID, file_id, transaction_counter, snapshot_id]
         PG_REPLICA1[PostgreSQL Replica 1<br/>СПб синхронная]
         PG_REPLICA2[PostgreSQL Replica 2<br/>Нью-Йорк асинхронная]
         PG_REPLICA3[PostgreSQL Replica 3<br/>Франкфурт асинхронная]
@@ -500,15 +544,15 @@ graph TB
     
     subgraph "Ceph S3 (Multi-region)"
         subgraph "Регион: Нью-Йорк"
-            CEPH_NY[Ceph Node<br/>document_body<br/>document_diffs<br/>document_snapshots<br/>file_versions]
+            CEPH_NY[Ceph Node<br/>document_body<br/>document_snapshots<br/>file_versions]
         end
         
         subgraph "Регион: Франкфурт"
-            CEPH_FR[Ceph Node<br/>document_body<br/>document_diffs<br/>document_snapshots<br/>file_versions]
+            CEPH_FR[Ceph Node<br/>document_body<br/>document_snapshots<br/>file_versions]
         end
         
         subgraph "Регион: СПб"
-            CEPH_SPB[Ceph Node<br/>document_body<br/>document_diffs<br/>document_snapshots<br/>file_versions]
+            CEPH_SPB[Ceph Node<br/>document_body<br/>document_snapshots<br/>file_versions]
         end
         
         CEPH_NY <-->|CRUSH<br/>Репликация 3x| CEPH_FR
@@ -552,7 +596,7 @@ graph TB
 |---------|------|----------------|
 | **users, teams, team_members, projects, files, file_versions, file_access** | PostgreSQL | Реляционные данные требуют транзакций и сложных JOIN-запросов (например, проверка прав доступа с объединением file_access и users). PostgreSQL отлично справляется с такими запросами благодаря индексам и оптимизатору. |
 | **document_body, document_resources** | Ceph (S3) | Большие файлы (YAML структура, ресурсы) хранятся в Object Storage |
-| **document_diffs, document_snapshots, document_transactions** | Ceph (S3) | Дифы и снапшоты хранятся как файлы в Object Storage, метаданные в PostgreSQL |
+| **document_snapshots** | Ceph (S3) + PostgreSQL | Снапшоты хранятся как файлы в Object Storage (Ceph), метаданные в PostgreSQL |
 | **operations** | Apache Cassandra | Операции редактирования и комментарии объединены. Критично низкая задержка записи — Cassandra позволяет писать локально в каждом регионе. Высокая нагрузка (29,085 QPS пик) требует горизонтального масштабирования. **Проверка:** Cassandra может обработать 24+ млрд операций — по бенчмаркам одна нода обрабатывает до 10,000 записей/сек, при 9 нодах × 3 региона = 27 нод, итого до 270,000 записей/сек, что покрывает 29,085 QPS с запасом. |
 | **static_assets** | CDN + PostgreSQL | Метаданные в PostgreSQL, сами файлы в CDN |
 | **user_sessions** | Redis | Быстрый доступ, TTL для автоматического удаления |
@@ -565,9 +609,8 @@ graph TB
 | **PostgreSQL** | files | `CREATE INDEX idx_files_project_id ON files(project_id);`<br>`CREATE INDEX idx_files_created_at ON files(created_at DESC);` | Поиск файлов в проекте, сортировка по дате |
 | **PostgreSQL** | file_versions | `CREATE INDEX idx_file_versions_file_id ON file_versions(file_id, version_number DESC);` | Получение версий файла |
 | **PostgreSQL** | file_access | `CREATE INDEX idx_file_access_file_user ON file_access(file_id, user_id);` | Проверка прав доступа |
-| **Cassandra** | operations | `PRIMARY KEY ((file_id), transaction_id, operation_id)` | Партиционирование по file_id, сортировка по transaction_id (не по timestamp, чтобы избежать конфликтов) |
-| **PostgreSQL** | document_transactions | `CREATE INDEX idx_transactions_file_snapshot ON document_transactions(file_id, snapshot_id, transaction_id);` | Поиск транзакций относительно снапшота |
-| **PostgreSQL** | document_diffs | `CREATE INDEX idx_diffs_file_transaction ON document_diffs(file_id, transaction_id);` | Поиск дифов по файлу и транзакции |
+| **Cassandra** | operations | `PRIMARY KEY ((file_id), transaction_counter, id)` | Партиционирование по file_id, сортировка по transaction_counter для последовательного чтения |
+| **PostgreSQL** | operations_metadata | `CREATE INDEX idx_operations_file_counter ON operations_metadata(file_id, transaction_counter);`<br>`CREATE INDEX idx_operations_snapshot ON operations_metadata(snapshot_id);` | Поиск операций по файлу и счетчику, поиск операций относительно снапшота |
 
 ### **Шардирование**
 
@@ -576,7 +619,8 @@ graph TB
 | **files** | Шардирование по `project_id` при помощи Citus |
 | **file_versions** | Шардирование по `file_id` при помощи Citus |
 | **file_access** | Шардирование по `file_id` при помощи Citus |
-| **document_diffs, document_snapshots, document_transactions** | Шардирование по `file_id` при помощи Citus |
+| **document_snapshots** | Шардирование по `file_id` при помощи Citus |
+| **operations_metadata** | Шардирование по `file_id` при помощи Citus |
 | **operations** | Автошардирование (Cassandra) по `file_id` |
 
 ### **Резервирование**
@@ -601,8 +645,8 @@ graph TB
 | Алгоритм | Область применения | Обоснование |
 |----------|-------------------|-----------|
 | **CRDT (Conflict-free Replicated Data Types)** | Реалтайм-коллаборация и синхронизация | **Выбранный алгоритм.** Обеспечивает консистентность при одновременном редактировании без центрального координатора. Операции применяются локально и автоматически конвергируют к одному состоянию. Критично для снижения задержки — операции применяются без ожидания подтверждения от сервера. Работает идеально с распределенной архитектурой, где запись происходит в разных регионах. |
-| **Snapshot + Diffs (Git-подобная модель)** | Хранение и восстановление документов | Документ хранится как снапшот (полное состояние) + последовательность дифов (изменений). Снапшоты создаются периодически по ID транзакции. Для восстановления: берем снапшот + применяем все дифы после транзакции снапшота. Это позволяет быстро восстановить любое состояние документа без хранения всех версий целиком. |
-| **Transaction-based ordering** | Разрешение конфликтов | Используем ID транзакции вместо timestamp для определения порядка операций. Это решает проблему конфликтов при одновременном редактировании — каждая операция получает уникальный transaction_id, который определяет точку относительно снапшота. |
+| **Snapshot + Operations (Git-подобная модель)** | Хранение и восстановление документов | Документ хранится как снапшот (полное состояние) + последовательность операций (изменений). Снапшоты создаются периодически по transaction_counter. Для восстановления: берем снапшот + применяем все операции после transaction_counter снапшота. Это позволяет быстро восстановить любое состояние документа без хранения всех версий целиком. |
+| **Transaction counter + CRDT** | Разрешение конфликтов | Используем transaction_counter (монотонно возрастающий счетчик для файла) вместо timestamp для определения порядка операций. Вместе с CRDT это решает проблему конфликтов при одновременном редактировании — каждая операция получает уникальный transaction_counter, который определяет точку относительно снапшота. CRDT автоматически разрешает конфликты при одинаковом transaction_counter. |
 | **Lazy Loading** | Загрузка элементов холста | Загружаются только видимые элементы и элементы вблизи viewport, что ускоряет открытие файлов. Критично для UX — пользователь видит файл почти мгновенно. |
 
 
@@ -694,9 +738,9 @@ graph TB
         end
         
         subgraph "Ceph S3 (Multi-region)"
-            CEPH_NY[Ceph NY<br/>document_body<br/>document_diffs<br/>snapshots]
-            CEPH_FR[Ceph FR<br/>document_body<br/>document_diffs<br/>snapshots]
-            CEPH_SPB[Ceph СПб<br/>document_body<br/>document_diffs<br/>snapshots]
+            CEPH_NY[Ceph NY<br/>document_body<br/>snapshots]
+            CEPH_FR[Ceph FR<br/>document_body<br/>snapshots]
+            CEPH_SPB[Ceph СПб<br/>document_body<br/>snapshots]
         end
         
         REDIS[Redis<br/>user_sessions]
@@ -824,39 +868,40 @@ graph TB
 2. Client → **L7 (NGINX)** → **File_Service** [Auth] → проверка прав доступа через DB_Service в СПб
 3. **File_Service** → **DB_Service (СПб)** → получение метаданных файла из PostgreSQL
 4. **File_Service** → **Ceph (S3)** в регионе → получение последнего снапшота файла
-5. **File_Service** → **Cassandra** в регионе → получение всех дифов после снапшота
-6. Client получает снапшот + дифы, применяет их локально через CRDT
+5. **File_Service** → **Cassandra** в регионе → получение всех операций после снапшота (по transaction_counter)
+6. Client получает снапшот + операции, применяет их локально через CRDT
 7. Client устанавливает WebSocket-соединение с **Editor_Collab_Service** в локальном регионе
-8. Client отправляет свой текущий transaction_id серверу для синхронизации
+8. Client отправляет свой текущий transaction_counter серверу для синхронизации
 
 #### **Редактирование файла**
 
 **Алгоритм репликации:**
 
-1. Client → **Editor_Collab_Service** (WebSocket) → отправка операции с текущим transaction_id клиента
-2. **Editor_Collab_Service** → генерирует новый transaction_id для операции
+1. Client → **Editor_Collab_Service** (WebSocket) → отправка операции с текущим transaction_counter клиента
+2. **Editor_Collab_Service** → генерирует новый transaction_counter для операции (монотонно возрастающий счетчик для файла)
 3. **Editor_Collab_Service** → применяет операцию локально через CRDT (без ожидания сервера)
-4. **Editor_Collab_Service** → **Cassandra (operations) в локальном регионе** → сохранение операции с transaction_id и `LOCAL_QUORUM` (задержка <5 мс)
-5. **Editor_Collab_Service** → broadcast операции всем подключенным пользователям файла в регионе через WebSocket
-6. Клиенты получают операцию и применяют её через CRDT относительно своей текущей позиции (transaction_id)
-7. **Клиент получает изменения относительно позиции x:** 
-   - Клиент отправляет серверу свой текущий transaction_id (позиция x)
-   - Сервер отправляет все операции с transaction_id > x
+4. **Editor_Collab_Service** → **Cassandra (operations) в локальном регионе** → сохранение операции с transaction_counter и `LOCAL_QUORUM` (задержка <5 мс)
+5. **Editor_Collab_Service** → **PostgreSQL (operations_metadata)** → сохранение метаданных операции (ID, file_id, transaction_counter, snapshot_id) для быстрого поиска
+6. **Editor_Collab_Service** → broadcast операции всем подключенным пользователям файла в регионе через WebSocket
+7. Клиенты получают операцию и применяют её через CRDT относительно своей текущей позиции (transaction_counter)
+8. **Клиент получает изменения относительно позиции x:** 
+   - Клиент отправляет серверу свой текущий transaction_counter (позиция x)
+   - Сервер отправляет все операции с transaction_counter > x из PostgreSQL (метаданные) или Cassandra (полные данные)
    - Клиент применяет их последовательно через CRDT
    - Это гарантирует, что клиент получит все пропущенные операции при переподключении
-8. Асинхронно: **Cassandra** реплицирует операцию в другие регионы
-9. При получении операции из другого региона: клиент применяет её через CRDT, если transaction_id больше текущего
+9. Асинхронно: **Cassandra** реплицирует операцию в другие регионы
+10. При получении операции из другого региона: клиент применяет её через CRDT, используя vector_clock для разрешения конфликтов
 
 **Работа с зависимыми файлами:**
 - Если файл использует ресурсы из другого файла (например, компонент из библиотеки), при открытии файла загружаются метаданные зависимых файлов
 - Ресурсы (изображения, шрифты) загружаются по требованию через CDN
 
 #### **Создание снапшота**
-1. **Version_Service** → периодически (каждые 100 операций или раз в час) создает снапшот
-2. **Version_Service** → получает текущее состояние файла через CRDT (применяет все дифы к последнему снапшоту)
+1. **Version_Service** → периодически (каждые 1000 операций или раз в час, что наступит раньше) создает снапшот
+2. **Version_Service** → получает текущее состояние файла через CRDT (применяет все операции к последнему снапшоту)
 3. **Version_Service** → сохраняет снапшот в **Ceph (S3)** в формате YAML
-4. **Version_Service** → сохраняет метаданные в **PostgreSQL (document_snapshots)** с transaction_id
-5. При восстановлении версии: берем снапшот по transaction_id + применяем все дифы после этой транзакции
+4. **Version_Service** → сохраняет метаданные в **PostgreSQL (document_snapshots)** с transaction_counter
+5. При восстановлении версии: берем снапшот по transaction_counter + применяем все операции после этого счетчика
 
 
 
