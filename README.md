@@ -705,14 +705,9 @@ graph TB
     end
     
     subgraph "Global Load Balancing"
-        CDN[CDN<br/>Cloudflare/AWS CloudFront<br/>Статика, превью]
-        DNS[Geo-Based DNS<br/>figma.com]
-    end
-    
-    subgraph "Нью-Йорк (Мастер)"
-        L7_NY_MASTER[NGINX L7<br/>Авторизация, создание файлов]
-        AUTH_SERVICE[Auth Service<br/>Регистрация, авторизация]
-        FILE_SERVICE_MASTER[File Service<br/>Создание файлов]
+        CDN[CDN<br/>Cloudflare<br/>Статика, превью]
+        DNS_FIGMA[Geo-Based DNS<br/>figma.com]
+        DNS_API[DNS<br/>api.figma.com]
     end
     
     subgraph "Нью-Йорк (Редактирование)"
@@ -728,15 +723,20 @@ graph TB
     end
     
     subgraph "СПб (Редактирование)"
-        L7_SPB[NGINX L7<br/>Редактирование]
+        L7_SPB[NGINX L7<br/>figma.com<br/>Редактирование]
         EDITOR_COLLAB_SPB[Editor_Collab Service<br/>Редактирование, коллаборация<br/>CRDT синхронизация<br/>WebSocket]
         VERSION_SPB[Version Service<br/>Снапшоты, версии]
     end
     
-    subgraph "СПб (База данных)"
+    subgraph "СПб (Мастер - БД и авторизация)"
+        L7_SPB_MASTER[NGINX L7<br/>api.figma.com<br/>Авторизация, создание файлов]
+        AUTH_SERVICE[Auth Service<br/>Регистрация, авторизация]
+        FILE_SERVICE[File Service<br/>Создание файлов]
         DB_SERVICE[DB Service<br/>Работа с PostgreSQL]
         PG_MASTER[PostgreSQL Master<br/>Метаданные файлов<br/>users, teams, projects]
     end
+    
+    subgraph "СПб (Редактирование)"
     
     subgraph "Storage"
         subgraph "Cassandra (Multi-region)"
@@ -761,25 +761,20 @@ graph TB
     %% Client connections
     WEB --> CDN
     MOBILE --> CDN
-    WEB --> DNS
-    MOBILE --> DNS
+    WEB --> DNS_FIGMA
+    MOBILE --> DNS_FIGMA
+    WEB --> DNS_API
+    MOBILE --> DNS_API
     
     %% DNS routing
-    DNS -->|USA| L7_NY_MASTER
-    DNS -->|USA| L7_NY
-    DNS -->|Europe| L7_FR
-    DNS -->|Russia| L7_SPB
+    DNS_FIGMA -->|USA| L7_NY
+    DNS_FIGMA -->|Europe| L7_FR
+    DNS_FIGMA -->|Russia| L7_SPB
+    DNS_API -->|Всегда| L7_SPB_MASTER
     
     %% CDN
     CDN -->|Статика| WEB
     CDN -->|Статика| MOBILE
-    
-    %% Нью-Йорк мастер
-    L7_NY_MASTER --> AUTH_SERVICE
-    L7_NY_MASTER --> FILE_SERVICE_MASTER
-    AUTH_SERVICE --> REDIS
-    AUTH_SERVICE -->|Чтение| DB_SERVICE
-    FILE_SERVICE_MASTER -->|Запись| DB_SERVICE
     
     %% Нью-Йорк редактирование
     L7_NY --> EDITOR_COLLAB_NY
@@ -817,7 +812,12 @@ graph TB
     VERSION_SPB -->|Метаданные снапшотов| DB_SERVICE
     VERSION_SPB -->|Чтение событий| KAFKA
     
-    %% СПб БД
+    %% СПб мастер
+    L7_SPB_MASTER --> AUTH_SERVICE
+    L7_SPB_MASTER --> FILE_SERVICE
+    AUTH_SERVICE --> REDIS
+    AUTH_SERVICE -->|Чтение| DB_SERVICE
+    FILE_SERVICE -->|Запись| DB_SERVICE
     DB_SERVICE --> PG_MASTER
     
     %% Репликация Cassandra
@@ -832,14 +832,15 @@ graph TB
     
     %% Styling
     style CDN fill:#ffe6cc,stroke:#d79b00
-    style DNS fill:#ffe6cc,stroke:#d79b00
-    style L7_NY_MASTER fill:#ffe6cc,stroke:#d79b00
+    style DNS_FIGMA fill:#ffe6cc,stroke:#d79b00
+    style DNS_API fill:#ffe6cc,stroke:#d79b00
     style L7_NY fill:#ffe6cc,stroke:#d79b00
     style L7_FR fill:#ffe6cc,stroke:#d79b00
     style L7_SPB fill:#ffe6cc,stroke:#d79b00
+    style L7_SPB_MASTER fill:#ffe6cc,stroke:#d79b00
     
     style AUTH_SERVICE fill:#d5e8d4,stroke:#82b366
-    style FILE_SERVICE_MASTER fill:#d5e8d4,stroke:#82b366
+    style FILE_SERVICE fill:#d5e8d4,stroke:#82b366
     style EDITOR_COLLAB_NY fill:#d5e8d4,stroke:#82b366
     style EDITOR_COLLAB_FR fill:#d5e8d4,stroke:#82b366
     style EDITOR_COLLAB_SPB fill:#d5e8d4,stroke:#82b366
@@ -863,8 +864,8 @@ graph TB
 
 | Сервис | Назначение |
 |:--|:--|
-| **Auth_Service** | Управление пользователями: регистрация, авторизация, управление сессиями. Расположен в Нью-Йорке (мастер). |
-| **File_Service** | Управление метаданными файлов и проектов: создание, список, права доступа. Расположен в Нью-Йорке (мастер) для создания файлов, в СПб для работы с БД. |
+| **Auth_Service** | Управление пользователями: регистрация, авторизация, управление сессиями. Расположен в Санкт-Петербурге (мастер). |
+| **File_Service** | Управление метаданными файлов и проектов: создание, список, права доступа. Расположен в Санкт-Петербурге (мастер) для создания файлов и работы с PostgreSQL. |
 | **Editor_Collab_Service** | Объединенный сервис для редактирования, коллаборации, комментариев и операций. Обрабатывает операции редактирования, управляет WebSocket-соединениями, broadcast операций между пользователями, синхронизацию через CRDT, комментарии. Расположен в региональных ДЦ (Нью-Йорк, Франкфурт, СПб). |
 | **Version_Service** | Управление версиями файлов: создание снапшотов по ID транзакции, восстановление версий через снапшот + дифы. Расположен в региональных ДЦ. |
 | **DB_Service** | Сервис для работы с PostgreSQL. Расположен в СПб рядом с базой данных для минимальной задержки. |
@@ -873,13 +874,13 @@ graph TB
 
 #### **Открытие файла**
 1. Client → **CDN** (статичные ассеты: JS/CSS) → отдача из edge-кэша 
-2. Client → **L7 (NGINX)** → **File_Service** [Auth] → проверка прав доступа через DB_Service в СПб
-3. **File_Service** → **DB_Service (СПб)** → получение метаданных файла из PostgreSQL
-4. **File_Service** → **Ceph (S3)** в регионе → получение последнего снапшота файла
-5. **File_Service** → **Cassandra** в регионе → получение всех операций после снапшота (по transaction_counter)
-6. Client получает снапшот + операции, применяет их локально через CRDT
-7. Client устанавливает WebSocket-соединение с **Editor_Collab_Service** в локальном регионе
-8. Client отправляет свой текущий transaction_counter серверу для синхронизации
+2. Client → **GeoDNS (figma.com)** → попадает в ближайший региональный ДЦ
+3. Client → **L7 (NGINX)** → **Editor_Collab_Service** в регионе
+4. **Editor_Collab_Service** → проверка прав доступа через **DB_Service (СПб)** → получение метаданных файла из PostgreSQL реплики
+5. **Editor_Collab_Service** → **Ceph (S3)** в локальном регионе → получение последнего снапшота файла
+6. **Editor_Collab_Service** → **Cassandra** в локальном регионе → получение всех операций после снапшота (по transaction_counter)
+7. Client получает снапшот + операции, применяет их локально через CRDT
+8. Client устанавливает WebSocket-соединение с **Editor_Collab_Service** в локальном регионе
 
 #### **Редактирование файла**
 
@@ -905,11 +906,12 @@ graph TB
 - Ресурсы (изображения, шрифты) загружаются по требованию через CDN
 
 #### **Создание снапшота**
-1. **Version_Service** → периодически (каждые 1000 операций или раз в час, что наступит раньше) создает снапшот
+1. **Version_Service** в региональном ДЦ → периодически (каждые 1000 операций или раз в час, что наступит раньше) создает снапшот
 2. **Version_Service** → получает текущее состояние файла через CRDT (применяет все операции к последнему снапшоту)
-3. **Version_Service** → сохраняет снапшот в **Ceph (S3)** в формате YAML
-4. **Version_Service** → сохраняет метаданные в **PostgreSQL (document_snapshots)** с transaction_counter
-5. При восстановлении версии: берем снапшот по transaction_counter + применяем все операции после этого счетчика
+3. **Version_Service** → сохраняет снапшот в **Ceph (S3)** в локальном регионе в формате YAML
+4. **Version_Service** → сохраняет метаданные в **PostgreSQL (document_snapshots)** мастер в СПб через DB_Service (асинхронно)
+5. Снапшот реплицируется в Ceph других регионов через multi-region репликацию
+6. При восстановлении версии: берем снапшот по transaction_counter из локального Ceph + применяем все операции после этого счетчика из локальной Cassandra
 
 
 
@@ -947,21 +949,20 @@ graph TB
 
 | Сервис | RPS | CPU (ядер) | RAM (ГБ) | Replicas | Replicas/AZ |
 |--------|-----|------------|----------|----------|-------------|
-| **Auth_Service** (Нью-Йорк) | 50 | 1 | 0.1 | 3 | 1 |
-| **File_Service** (Нью-Йорк + СПб) | 596 | 1 | 0.1 | 3 | 1 |
+| **Auth_Service** (СПб, мастер) | 50 | 1 | 0.1 | 3 | 1 |
+| **File_Service** (СПб, мастер) | 596 | 1 | 0.1 | 3 | 1 |
 | **Editor_Collab_Service** (регионы) | 29,085 | 85 | 17 | 15 | 5 |
 | **Version_Service** (регионы) | 150 | 1 | 0.2 | 3 | 1 |
-| **DB_Service** (СПб) | 1,200 | 12 | 2.4 | 3 | 1 |
+| **DB_Service** (СПб, мастер) | 1,200 | 12 | 2.4 | 3 | 1 |
 
 ### **Итоговая таблица: серверы по регионам**
 
 | Регион | L7 | Auth | File | Editor_Collab | Version | DB_Service |
 |--------|----|------|------|---------------|---------|-------------|
-| **Нью-Йорк** (мастер) | 2 | 3 | 3 | — | — | — |
 | **Нью-Йорк** (редактирование) | 12 | — | — | 15 | 3 | — |
 | **Франкфурт** (редактирование) | 10 | — | — | 12 | 3 | — |
+| **СПб** (мастер - БД и авторизация) | 2 | 3 | 3 | — | — | 3 |
 | **СПб** (редактирование) | 10 | — | — | 13 | 3 | — |
-| **СПб** (БД) | — | — | — | — | — | 3 |
 
 **Примечание:** Расчеты для Франкфурта и СПб выполнены аналогично Нью-Йорку на основе их RPS (29,670 и 31,582 соответственно).
 
