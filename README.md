@@ -212,12 +212,13 @@ GeoDNS работает по географии DNS resolver'а, а не по la
 
 ### **4.1. Схема балансировки**
 
-После попадания пользователя в региональный ДЦ через Geo-Based DNS, запрос обрабатывается следующим образом:
+После попадания пользователя в региональный ДЦ через GeoDNS (на основе географии DNS resolver'а), запрос обрабатывается следующим образом:
 
 1. **CDN** (глобальная балансировка):
-   - Статика (JS/CSS бандлы, ассеты, превью) отдается из ближайших edge-серверов
+   - Статика (JS/CSS бандлы, ассеты, превью) отдается из edge-серверов CDN
+   - CDN использует свою собственную глобальную балансировку (Anycast или latency-based) для выбора edge-сервера, ближайшего к клиенту по сетевой задержке
    - Защита от DDoS на уровне CDN
-   - Если статика не в кэше CDN, запрос идет на L7-балансировщик
+   - Если статика не в кэше CDN, запрос идет на региональный ДЦ, определенный GeoDNS для этого клиента
 
 2. **L7-балансировщик** (NGINX):
    - Принимаем трафик сразу на L7 (без L4), так как NGINX справляется с нагрузкой
@@ -743,8 +744,8 @@ graph TB
     
     subgraph "Global Load Balancing"
         CDN[CDN<br/>Cloudflare<br/>Статика, превью]
-        DNS_FIGMA[Geo-Based DNS<br/>figma.com]
-        DNS_API[DNS<br/>api.figma.com]
+        DNS_FIGMA[GeoDNS<br/>figma.com<br/>Географическая маршрутизация]
+        DNS_API[DNS<br/>api.figma.com<br/>Фиксированный маршрут в СПб]
     end
     
     subgraph "Нью-Йорк (Редактирование)"
@@ -772,8 +773,6 @@ graph TB
         DB_SERVICE[DB Service<br/>Работа с PostgreSQL]
         PG_MASTER[PostgreSQL Master<br/>Метаданные файлов<br/>users, teams, projects]
     end
-    
-    subgraph "СПб (Редактирование)"
     
     subgraph "Storage"
         subgraph "Cassandra (Multi-region)"
@@ -804,9 +803,9 @@ graph TB
     MOBILE --> DNS_API
     
     %% DNS routing
-    DNS_FIGMA -->|USA| L7_NY
-    DNS_FIGMA -->|Europe| L7_FR
-    DNS_FIGMA -->|Russia| L7_SPB
+    DNS_FIGMA -->|Северная Америка<br/>GeoIP| L7_NY
+    DNS_FIGMA -->|Европа, Азия<br/>GeoIP| L7_FR
+    DNS_FIGMA -->|Россия и СНГ<br/>GeoIP| L7_SPB
     DNS_API -->|Всегда| L7_SPB_MASTER
     
     %% CDN
